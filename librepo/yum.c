@@ -20,6 +20,7 @@
 
 #define _POSIX_SOURCE
 #define _DEFAULT_SOURCE
+#define  BITS_IN_BYTE 8
 
 #include <stdio.h>
 #include <assert.h>
@@ -46,11 +47,12 @@
 #include "cleanup.h"
 #include "librepo.h"
 #include "yum.h"
+#include "downloadtarget.h"
 
 /* helper functions for YumRepo manipulation */
 
 LrYumRepo *
-lr_yum_repo_init(void)
+lr_yum_repo_init()
 {
     return lr_malloc0(sizeof(LrYumRepo));
 }
@@ -182,6 +184,15 @@ lr_yum_repomd_record_enabled(LrHandle *handle, const char *type, GSList* records
     }
     return TRUE;
 }
+
+/** Mirror Failure Callback Data
+ */
+typedef struct CbData_s {
+    void *userdata;                 /*!< User data */
+    LrProgressCb progresscb;        /*!< Progress callback */
+    LrHandleMirrorFailureCb hmfcb;  /*!< Handle mirror failure callback */
+    char *metadata;                 /*!< "primary", "filelists", ... */
+} CbData;
 
 static CbData *cbdata_new(void *userdata,
                           void *cbdata,
@@ -453,6 +464,19 @@ lr_get_best_checksum(const LrMetalink *metalink,
             g_debug("%s: Expected alternate checksum for repomd.xml: (%s) %s",
                     __func__, lr_checksum_type_to_str(ch_type), ch_value);
         }
+
+        // From the alternates entries
+        for (GSList *elem = metalink->alternates; elem; elem = g_slist_next(elem)) {
+            LrMetalinkAlternate *alt = elem->data;
+            ret = lr_best_checksum(alt->hashes, &ch_type, &ch_value);
+            if (ret) {
+                LrDownloadTargetChecksum *dtch;
+                dtch = lr_downloadtargetchecksum_new(ch_type, ch_value);
+                checksums = g_slist_prepend(checksums, dtch);
+                g_debug("%s: Expected alternate checksum for repomd.xml: (%s) %s",
+                        __func__, lr_checksum_type_to_str(ch_type), ch_value);
+            }
+        }
     }
 }
 
@@ -547,7 +571,11 @@ prepare_repo_download_targets(LrHandle *handle,
                               GSList **cbdata_list,
                               GError **err)
 {
+    gboolean ret = TRUE;
     char *destdir;  /* Destination dir */
+    GSList *targets = NULL;
+    GSList *cbdata_list = NULL;
+    GError *tmp_err = NULL;
 
     destdir = handle->destdir;
     assert(destdir);
@@ -610,7 +638,7 @@ prepare_repo_download_targets(LrHandle *handle,
                                        fd,
                                        NULL,
                                        checksums,
-                                       0,
+                                       record->size / BITS_IN_BYTE,
                                        0,
                                        NULL,
                                        cbdata,
@@ -1026,8 +1054,11 @@ lr_yum_use_local(LrHandle *handle, LrResult *result, GError **err)
 static gboolean
 lr_yum_download_remote(LrHandle *handle, LrResult *result, GError **err)
 {
+    int rc;
     gboolean ret = TRUE;
     int fd;
+    int create_repodata_dir = 1;
+    char *path_to_repodata;
     LrYumRepo *repo;
     LrYumRepoMd *repomd;
     GError *tmp_err = NULL;
@@ -1047,12 +1078,16 @@ lr_yum_download_remote(LrHandle *handle, LrResult *result, GError **err)
 
         if (!lr_store_mirrorlist_files(handle, repo, err))
             return FALSE;
+        }
+    }
+    lr_free(path_to_repodata);
 
         if (!lr_copy_metalink_content(handle, repo, err))
             return FALSE;
 
         if ((fd = lr_prepare_repomd_xml_file(handle, &path, err)) == -1)
             return FALSE;
+        }
 
         /* Download repomd.xml */
         ret = lr_yum_download_repomd(handle, handle->metalink, fd, err);

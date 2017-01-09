@@ -1843,6 +1843,13 @@ transfer_error:
                                 "Interupted by LR_CB_ERROR from end callback");
                 }
             }
+
+            // Update mirror statistics
+            if (target->mirror) {
+                target->mirror->successful_transfers++;
+                if (dd->adaptivemirrorsorting)
+                    sort_mirrors(target->lrmirrors, target->mirror, TRUE, serious_error);
+            }
         }
 
         lr_free(effective_url);
